@@ -3,7 +3,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from basicsr.archs.rrdbnet_arch import RRDBNet
@@ -67,6 +67,22 @@ def health() -> dict:
     }
 
 
+def _save_to_results(output: np.ndarray, original_name: str) -> str:
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(original_name or "image"))[0]
+    save_path = os.path.join(RESULTS_DIR, f"{base_name}_out.png")
+    if os.path.exists(save_path):
+        i = 1
+        while True:
+            candidate = os.path.join(RESULTS_DIR, f"{base_name}_out_{i}.png")
+            if not os.path.exists(candidate):
+                save_path = candidate
+                break
+            i += 1
+    cv2.imwrite(save_path, output)
+    return save_path
+
+
 @app.post("/upscale", responses={200: {"content": {"image/png": {}}}})
 async def upscale(file: UploadFile = File(...)) -> Response:
     if _upsampler is None:
@@ -86,18 +102,37 @@ async def upscale(file: UploadFile = File(...)) -> Response:
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(file.filename or "image"))[0]
-    save_path = os.path.join(RESULTS_DIR, f"{base_name}_out.png")
-    if os.path.exists(save_path):
-        i = 1
-        while True:
-            candidate = os.path.join(RESULTS_DIR, f"{base_name}_out_{i}.png")
-            if not os.path.exists(candidate):
-                save_path = candidate
-                break
-            i += 1
-    cv2.imwrite(save_path, output)
+    _save_to_results(output, file.filename or "image")
+
+    ok, encoded = cv2.imencode(".png", output)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode output")
+
+    return Response(content=encoded.tobytes(), media_type="image/png")
+
+
+@app.post("/upscale_binary", responses={200: {"content": {"image/png": {}}}})
+async def upscale_binary(
+    body: bytes = Body(...),
+    x_filename: Optional[str] = Header(default=None),
+) -> Response:
+    if _upsampler is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty body")
+
+    arr = np.frombuffer(body, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Unsupported or corrupt image")
+
+    try:
+        output, _ = _upsampler.enhance(img, outscale=OUTSCALE)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    _save_to_results(output, x_filename or "image")
 
     ok, encoded = cv2.imencode(".png", output)
     if not ok:
