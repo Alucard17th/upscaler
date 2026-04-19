@@ -1,0 +1,9 @@
+services:
+  realesrgan-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./weights:/app/weights
+      - ./results:/app/results
+    restart: unless-stopped
